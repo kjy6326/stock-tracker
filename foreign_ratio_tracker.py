@@ -1,20 +1,22 @@
 """
 📊 한국 주식 외국인 지분율 추적기 + 텔레그램 알림
-- pykrx 없이 KRX 웹사이트에 직접 HTTP 요청
-- 전일 대비 변화량 계산 후 텔레그램 발송
-- 매일 장마감 후 자동 실행
+- 네이버 금융 모바일 API 사용 (로그인/OTP 불필요)
+- 종목별로 지분율 직접 조회 → 전일 대비 변화량 계산
+- 매일 장마감 후 텔레그램 자동 발송
 
 필요 패키지:
     pip install requests pandas schedule python-telegram-bot
 """
 
-import io
 import json
 import time
 import asyncio
 import logging
 import schedule
 import sys
+import os
+import ast
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -49,107 +51,89 @@ def load_config() -> dict:
         raise FileNotFoundError("config.json 파일을 먼저 설정하세요.")
     with open(CONFIG_FILE, encoding="utf-8") as f:
         cfg = json.load(f)
-
-    # GitHub Actions: 환경변수가 있으면 config.json보다 우선 적용
-    import os
+    # GitHub Actions: 환경변수 우선 적용
     if os.environ.get("TELEGRAM_TOKEN"):
         cfg["telegram_token"] = os.environ["TELEGRAM_TOKEN"]
     if os.environ.get("TELEGRAM_CHAT_ID"):
         cfg["telegram_chat_id"] = os.environ["TELEGRAM_CHAT_ID"]
-
     return cfg
 
 
 # ──────────────────────────────────────────────
-# KRX 데이터 수집 (pykrx 없이 직접 HTTP)
+# 네이버 금융 API로 외국인 지분율 조회
 # ──────────────────────────────────────────────
-KRX_SESSION = requests.Session()
-KRX_SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Referer":    "http://data.krx.co.kr/",
-})
+NAVER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                  "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+    "Referer": "https://m.stock.naver.com/",
+}
 
+def fetch_naver_foreign_ratio(ticker: str, name: str) -> dict | None:
+    """
+    네이버 금융 모바일 API로 종목의 외국인 지분율 조회
+    URL: https://m.stock.naver.com/front-api/external/chart/domestic/info
+         ?symbol=005930&requestType=1&startTime=YYYYMMDD&endTime=YYYYMMDD&timeframe=day
+    반환 컬럼: 날짜, 시가, 고가, 저가, 종가, 거래량, 외국인소진율
+    """
+    today     = datetime.today().strftime("%Y%m%d")
+    # 최근 5일치 요청해서 가장 최신 데이터 사용 (공휴일 대비)
+    start     = (datetime.today() - timedelta(days=7)).strftime("%Y%m%d")
 
-def _fetch_one_market(date: str, market: str) -> pd.DataFrame:
-    """유가증권(STK) 또는 코스닥(KSQ) 외국인 지분율 CSV 다운로드"""
-    # 1) OTP 발급
-    otp_url  = "http://data.krx.co.kr/comm/fileDn/GenerateOTP/generate.cmd"
-    otp_data = {
-        "locale":        "ko_KR",
-        "market":        market,
-        "trdDd":         date,
-        "money":         "1",
-        "csvxls_isNo":   "false",
-        "name":          "fileDown",
-        "url":           "dbms/MDC/STAT/standard/MDCSTAT03402",
-    }
-    otp = KRX_SESSION.post(otp_url, data=otp_data, timeout=10).text.strip()
-    if not otp:
-        raise ValueError(f"OTP 발급 실패 (market={market}, date={date})")
-
-    # 2) CSV 다운로드
-    csv_resp = KRX_SESSION.post(
-        "http://data.krx.co.kr/comm/fileDn/download_csv/download.cmd",
-        data={"code": otp}, timeout=15
+    url = (
+        f"https://m.stock.naver.com/front-api/external/chart/domestic/info"
+        f"?symbol={ticker}&requestType=1"
+        f"&startTime={start}&endTime={today}&timeframe=day"
     )
-    raw = csv_resp.content.decode("euc-kr", errors="replace")
-    df  = pd.read_csv(io.StringIO(raw))
 
-    # 3) 컬럼 정규화
-    col_map = {}
-    for c in df.columns:
-        if   "종목코드"  in c: col_map[c] = "티커"
-        elif "종목명"    in c: col_map[c] = "종목명"
-        elif "지분율"    in c: col_map[c] = "지분율(%)"
-        elif "보유수량"  in c: col_map[c] = "보유수량"
-        elif "상장주식수" in c: col_map[c] = "상장수량"
-        elif "한도소진율" in c: col_map[c] = "한도소진율(%)"
-    df = df.rename(columns=col_map)
+    try:
+        resp = requests.get(url, headers=NAVER_HEADERS, timeout=10)
+        resp.raise_for_status()
+        raw = resp.text.strip()
 
-    for col in ["지분율(%)", "보유수량", "상장수량", "한도소진율(%)"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col].astype(str).str.replace(",", "").str.replace("%", ""),
-                errors="coerce"
-            ).fillna(0)
+        # 응답 포맷: [[컬럼...], [데이터행...], ...]
+        # 앞에 불필요한 문자가 붙을 수 있어 첫 '[' 부터 파싱
+        start_idx = raw.find("[[")
+        if start_idx == -1:
+            log.warning(f"{name}({ticker}): 응답 파싱 실패 — {raw[:100]}")
+            return None
 
-    df["티커"] = df["티커"].astype(str).str.zfill(6)
-    return df
+        data_list = ast.literal_eval(raw[start_idx:])
+        headers_row = data_list[0]   # ['날짜','시가','고가','저가','종가','거래량','외국인소진율']
+        rows        = data_list[1:]  # 실제 데이터
+
+        if not rows:
+            log.warning(f"{name}({ticker}): 데이터 없음")
+            return None
+
+        # 가장 최근 행
+        latest = dict(zip(headers_row, rows[-1]))
+        ratio  = float(latest.get("외국인소진율", 0))
+        date   = str(latest.get("날짜", today))
+
+        log.info(f"  {name}({ticker}): 외국인소진율={ratio}%, 날짜={date}")
+        return {
+            "날짜":          date,
+            "티커":          ticker,
+            "종목명":        name,
+            "지분율(%)":     round(ratio, 2),
+            "보유수량":      0,   # 네이버 API는 수량 미제공
+            "상장수량":      0,
+            "한도소진율(%)": round(ratio, 2),
+        }
+
+    except Exception as e:
+        log.error(f"{name}({ticker}) 조회 실패: {e}")
+        return None
 
 
-def fetch_all_markets(date: str) -> pd.DataFrame:
-    """유가증권 + 코스닥 합산"""
-    frames = []
-    for market in ("STK", "KSQ"):
-        try:
-            df = _fetch_one_market(date, market)
-            frames.append(df)
-            log.info(f"{market} {len(df)}종목 조회 완료")
-        except Exception as e:
-            log.error(f"{market} 조회 실패: {e}")
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-
-# ──────────────────────────────────────────────
-# 관심종목 필터링
-# ──────────────────────────────────────────────
-def filter_watchlist(all_df: pd.DataFrame, watchlist: dict, date: str) -> pd.DataFrame:
+def fetch_all_watchlist(watchlist: dict) -> pd.DataFrame:
+    """관심종목 전체 조회"""
     results = []
     for ticker, name in watchlist.items():
-        row = all_df[all_df["티커"] == ticker]
-        if not row.empty:
-            r = row.iloc[0]
-            results.append({
-                "날짜":          date,
-                "티커":          ticker,
-                "종목명":        name,
-                "지분율(%)":     round(float(r.get("지분율(%)", 0)), 2),
-                "보유수량":      int(r.get("보유수량", 0)),
-                "상장수량":      int(r.get("상장수량", 0)),
-                "한도소진율(%)": round(float(r.get("한도소진율(%)", 0)), 2),
-            })
-        else:
-            log.warning(f"{name}({ticker}) 데이터 없음")
+        row = fetch_naver_foreign_ratio(ticker, name)
+        if row:
+            results.append(row)
+        time.sleep(0.3)  # 서버 부하 방지
     return pd.DataFrame(results)
 
 
@@ -167,7 +151,7 @@ def save_history(df: pd.DataFrame):
     combined = combined.drop_duplicates(subset=["날짜", "티커"], keep="last")
     combined = combined.sort_values(["티커", "날짜"])
     combined.to_csv(DATA_FILE, index=False, encoding="utf-8-sig")
-    log.info(f"히스토리 저장 ({len(combined)}행 누적)")
+    log.info(f"히스토리 저장 완료 ({len(combined)}행 누적)")
 
 
 # ──────────────────────────────────────────────
@@ -194,10 +178,9 @@ def calc_changes(today_df: pd.DataFrame) -> pd.DataFrame:
         t = r["티커"]
         if t in prev_map.index:
             dr = round(r["지분율(%)"] - prev_map.loc[t, "지분율(%)"], 2)
-            dq = int(r["보유수량"]    - prev_map.loc[t, "보유수량"])
         else:
-            dr, dq = 0.0, 0
-        rows.append({**r.to_dict(), "변화(%)": dr, "변화수량": dq})
+            dr = 0.0
+        rows.append({**r.to_dict(), "변화(%)": dr, "변화수량": 0})
     return pd.DataFrame(rows)
 
 
@@ -213,18 +196,20 @@ def format_message(df: pd.DataFrame, date: str) -> str:
     ]
 
     for _, r in df.sort_values("변화(%)", ascending=False).iterrows():
-        chg, qty = r["변화(%)"], r["변화수량"]
-        if   chg > 0: arrow, chg_str = "🔺", f"+{chg:.2f}%  (+{qty:,}주)"
-        elif chg < 0: arrow, chg_str = "🔻", f"{chg:.2f}%  ({qty:,}주)"
-        else:         arrow, chg_str = "➖", "0.00%  (변동없음)"
+        chg = r["변화(%)"]
+        if   chg > 0: arrow, chg_str = "🔺", f"+{chg:.2f}%p"
+        elif chg < 0: arrow, chg_str = "🔻", f"{chg:.2f}%p"
+        else:         arrow, chg_str = "➖", "변동없음"
 
         lines += [
             f"\n*{r['종목명']}* `{r['티커']}`",
-            f"  지분율: *{r['지분율(%)']:.2f}%*  {arrow} {chg_str}",
-            f"  한도소진: {r['한도소진율(%)']:.1f}%  |  보유: {r['보유수량']:,}주",
+            f"  외국인소진율: *{r['지분율(%)']:.2f}%*  {arrow} {chg_str}",
         ]
 
-    lines += ["\n─────────────────────────", "📌 _데이터 출처: 한국거래소(KRX)_"]
+    lines += [
+        "\n─────────────────────────",
+        "📌 _데이터 출처: 네이버 금융_",
+    ]
     return "\n".join(lines)
 
 
@@ -252,21 +237,14 @@ def run_daily_job():
     chat_id   = config["telegram_chat_id"]
     watchlist = config["watchlist"]
 
-    today  = datetime.today().strftime("%Y%m%d")
-    log.info(f"조회 날짜: {today}")
-
-    all_df = fetch_all_markets(today)
-    if all_df.empty:
-        msg = f"⚠️ {today} KRX 데이터를 가져오지 못했습니다.\n공휴일이거나 아직 데이터 미확정일 수 있습니다."
+    today_df = fetch_all_watchlist(watchlist)
+    if today_df.empty:
+        msg = "⚠️ 오늘 데이터를 가져오지 못했습니다. 공휴일이거나 장 미개장일 수 있습니다."
         log.warning(msg)
         asyncio.run(send_telegram(token, chat_id, msg))
         return
 
-    today_df = filter_watchlist(all_df, watchlist, today)
-    if today_df.empty:
-        log.warning("관심종목 매칭 결과 없음")
-        return
-
+    today = today_df["날짜"].iloc[0]
     today_df = calc_changes(today_df)
     save_history(today_df)
     asyncio.run(send_telegram(token, chat_id, format_message(today_df, today)))
@@ -287,6 +265,12 @@ def start_scheduler():
         schedule.run_pending()
         time.sleep(30)
 
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--now":
+        run_daily_job()
+    else:
+        start_scheduler()
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--now":
