@@ -1,0 +1,9 @@
+# 텔레그램 토큰이 담긴 설정파일 — GitHub에 올리지 않음
+config.json
+
+# 로그
+tracker.log
+
+# 파이썬 캐시
+__pycache__/
+*.pyc

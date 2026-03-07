@@ -1,0 +1,20 @@
+{
+  "_주의": "telegram_token과 telegram_chat_id는 GitHub Secrets에 등록하세요. 이 파일은 GitHub에 올려도 됩니다.",
+
+  "telegram_token":   "GitHub Secrets에서 주입됨 (TELEGRAM_TOKEN)",
+  "telegram_chat_id": "GitHub Secrets에서 주입됨 (TELEGRAM_CHAT_ID)",
+
+  "run_time":     "16:30",
+  "run_on_start": false,
+
+  "watchlist": {
+    "005930": "삼성전자",
+    "000660": "SK하이닉스",
+    "035420": "NAVER",
+    "005380": "현대차",
+    "051910": "LG화학",
+    "006400": "삼성SDI",
+    "035720": "카카오",
+    "207940": "삼성바이오로직스"
+  }
+}

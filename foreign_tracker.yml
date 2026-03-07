@@ -1,0 +1,37 @@
+name: 📊 외국인 지분율 일간 추적
+
+on:
+  schedule:
+    # 한국시간 16:30 = UTC 07:30, 월~금만 실행
+    - cron: '30 7 * * 1-5'
+  workflow_dispatch:  # 수동 실행 버튼 (테스트용)
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 패키지 설치
+        run: pip install requests pandas python-telegram-bot
+
+      - name: 외국인 지분율 조회 및 텔레그램 발송
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python foreign_ratio_tracker.py --now
+
+      - name: 히스토리 CSV 커밋 (누적 저장)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add foreign_ratio_history.csv || true
+          git diff --staged --quiet || git commit -m "📊 외국인 지분율 업데이트 $(date +'%Y-%m-%d')"
+          git push || true
