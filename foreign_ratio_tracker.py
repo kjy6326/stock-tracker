@@ -142,9 +142,8 @@ def fetch_all_watchlist(watchlist: dict) -> pd.DataFrame:
 # ──────────────────────────────────────────────
 def load_history() -> pd.DataFrame:
     if DATA_FILE.exists():
-        return pd.read_csv(DATA_FILE, dtype={"티커": str})
+        return pd.read_csv(DATA_FILE, dtype={"티커": str, "날짜": str})  # ← "날짜": str 추가
     return pd.DataFrame()
-
 
 def save_history(df: pd.DataFrame):
     combined = pd.concat([load_history(), df], ignore_index=True)
