@@ -21,7 +21,8 @@ jobs:
 
       - name: 패키지 설치
         run: pip install requests pandas python-telegram-bot
-
+      - name: Install schedule module
+        run: pip install schedule
       - name: 외국인 지분율 조회 및 텔레그램 발송
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
