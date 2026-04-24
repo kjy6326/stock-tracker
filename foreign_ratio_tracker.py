@@ -140,13 +140,12 @@ def fetch_all_watchlist(watchlist: dict) -> pd.DataFrame:
 # ──────────────────────────────────────────────
 # 히스토리 저장 / 로드
 # ──────────────────────────────────────────────
-def load_history() -> pd.DataFrame:
-    if DATA_FILE.exists():
-        return pd.read_csv(DATA_FILE, dtype={"티커": str, "날짜": str})  # ← "날짜": str 추가
-    return pd.DataFrame()
-
 def save_history(df: pd.DataFrame):
-    combined = pd.concat([load_history(), df], ignore_index=True)
+    # 저장할 컬럼만 선택 (변화(%)는 제외)
+    cols_to_save = ["날짜", "티커", "종목명", "지분율(%)", "보유수량", "상장수량", "한도소진율(%)"]
+    df_to_save = df[[col for col in cols_to_save if col in df.columns]]
+    
+    combined = pd.concat([load_history(), df_to_save], ignore_index=True)
     combined = combined.drop_duplicates(subset=["날짜", "티커"], keep="last")
     combined = combined.sort_values(["티커", "날짜"])
     combined.to_csv(DATA_FILE, index=False, encoding="utf-8-sig")
