@@ -140,6 +140,17 @@ def fetch_all_watchlist(watchlist: dict) -> pd.DataFrame:
 # ──────────────────────────────────────────────
 # 히스토리 저장 / 로드
 # ──────────────────────────────────────────────
+
+def load_history() -> pd.DataFrame:
+    """히스토리 파일 로드 (없으면 빈 DataFrame 반환)"""
+    if not DATA_FILE.exists():
+        return pd.DataFrame(columns=["날짜", "티커", "종목명", "지분율(%)", "보유수량", "상장수량", "한도소진율(%)"])
+    try:
+        return pd.read_csv(DATA_FILE, encoding="utf-8-sig")
+    except Exception as e:
+        log.warning(f"히스토리 로드 실패: {e}")
+        return pd.DataFrame(columns=["날짜", "티커", "종목명", "지분율(%)", "보유수량", "상장수량", "한도소진율(%)"])
+
 def save_history(df: pd.DataFrame):
     # 저장할 컬럼만 선택 (변화(%)는 제외)
     cols_to_save = ["날짜", "티커", "종목명", "지분율(%)", "보유수량", "상장수량", "한도소진율(%)"]
