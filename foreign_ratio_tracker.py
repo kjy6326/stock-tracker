@@ -142,23 +142,61 @@ def fetch_all_watchlist(watchlist: dict) -> pd.DataFrame:
 # ──────────────────────────────────────────────
 
 def load_history() -> pd.DataFrame:
-    """히스토리 파일 로드 (없으면 빈 DataFrame 반환)"""
+    """히스토리 파일 로드 (없으면 빈 DataFrame 반환). 반환 시 지분율은 숫자형이며 가능하면 '변화(%)'도 계산합니다."""
+    cols = [
+        "날짜", "티커", "종목명", "지분율(%)",
+        "보유수량", "상장수량", "한도소진율(%)",
+        "변화(%)", "변화수량",
+    ]
+
     if not DATA_FILE.exists():
-        return pd.DataFrame(columns=["날짜", "티커", "종목명", "지분율(%)", "보유수량", "상장수량", "한도소진율(%)"])
+        return pd.DataFrame(columns=cols)
+
     try:
-        return pd.read_csv(DATA_FILE, encoding="utf-8-sig")
+        df = pd.read_csv(DATA_FILE, encoding="utf-8-sig")
     except Exception as e:
         log.warning(f"히스토리 로드 실패: {e}")
-        return pd.DataFrame(columns=["날짜", "티커", "종목명", "지분율(%)", "보유수량", "상장수량", "한도소진율(%)"])
+        return pd.DataFrame(columns=cols)
+
+    # 날짜를 문자열로 통일
+    if "날짜" in df.columns:
+        df["날짜"] = df["날짜"].astype(str)
+
+    # 지분율(%) 문자열 정리 및 숫자 변환 (예: '1.23%' 또는 '1,23%')
+    if "지분율(%)" in df.columns:
+        df["지분율(%)"] = df["지분율(%)"].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False)
+        df["지분율(%)"] = pd.to_numeric(df["지분율(%)"], errors="coerce")
+
+    # 변화(%) 컬럼이 없으면 티커별로 전일대비(포인트 차이) 계산
+    if "변화(%)" not in df.columns and "지분율(%)" in df.columns:
+        df = df.sort_values(["티커", "날짜"]) if set(["티커", "날짜"]).issubset(df.columns) else df
+        try:
+            df["변화(%)"] = df.groupby("티커")["지분율(%)"].diff().round(2)
+        except Exception:
+            df["변화(%)"] = pd.NA
+
+    # 변화수량 컬럼 보장
+    if "변화수량" not in df.columns:
+        df["변화수량"] = 0
+
+    # 부족한 컬럼 채우기
+    for c in cols:
+        if c not in df.columns:
+            df[c] = pd.NA
+
+    return df
 
 def save_history(df: pd.DataFrame):
-    # 저장할 컬럼만 선택 (변화(%)는 제외)
-    cols_to_save = ["날짜", "티커", "종목명", "지분율(%)", "보유수량", "상장수량", "한도소진율(%)"]
+    # 저장할 컬럼 (변화도 함께 저장)
+    cols_to_save = [
+        "날짜", "티커", "종목명", "지분율(%)", "변화(%)",
+        "보유수량", "상장수량", "한도소진율(%)", "변화수량",
+    ]
     df_to_save = df[[col for col in cols_to_save if col in df.columns]]
     
     combined = pd.concat([load_history(), df_to_save], ignore_index=True)
     combined = combined.drop_duplicates(subset=["날짜", "티커"], keep="last")
-    combined = combined.sort_values(["티커", "날짜"])
+    combined = combined.sort_values(["티커", "날짜"]) if set(["티커","날짜"]).issubset(combined.columns) else combined
     combined.to_csv(DATA_FILE, index=False, encoding="utf-8-sig")
     log.info(f"히스토리 저장 완료 ({len(combined)}행 누적)")
 
@@ -186,7 +224,10 @@ def calc_changes(today_df: pd.DataFrame) -> pd.DataFrame:
     for _, r in today_df.iterrows():
         t = r["티커"]
         if t in prev_map.index:
-            dr = round(r["지분율(%)"] - prev_map.loc[t, "지분율(%)"], 2)
+            try:
+                dr = round(r["지분율(%)"] - prev_map.loc[t, "지분율(%)"], 2)
+            except Exception:
+                dr = 0.0
         else:
             dr = 0.0
         rows.append({**r.to_dict(), "변화(%)": dr, "변화수량": 0})
@@ -280,6 +321,7 @@ if __name__ == "__main__":
         run_daily_job()
     else:
         start_scheduler()
+
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--now":
